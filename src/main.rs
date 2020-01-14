@@ -1,5 +1,6 @@
+#![feature(type_alias_impl_trait)]
+
 use async_std::net::TcpStream;
-use futures::future::FutureExt;
 use futures_util::io::AsyncWriteExt;
 use http::Uri;
 use hyper::body::HttpBody as _;
@@ -81,31 +82,35 @@ impl<T> Connection for NewCompat<T> {
 impl Service<Uri> for AsyncStdTcpConnector {
     type Response = NewCompat<Compat<TcpStream>>;
     type Error = async_std::io::Error;
-    type Future =
-        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+    type Future = impl Future<Output = std::result::Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: Uri) -> Self::Future {
-        let port = match req.port() {
-            Some(p) => p.as_u16(),
-            None => 80,
-        };
+        Box::pin(async move {
+            let port = match req.port() {
+                Some(p) => p.as_u16(),
+                None => 80,
+            };
 
-        let host = req.host().unwrap().to_string();
+            let host = match req.host() {
+                Some(host) => host,
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "missing host in Uri",
+                    ))
+                }
+            };
 
-        let sockaddr = std::net::SocketAddr::new(host.parse().unwrap(), port);
+            let stream = TcpStream::connect((host, port)).await?;
 
-        let r = TcpStream::connect(sockaddr).map(move |x| {
-            x.map(move |x| {
-                let a = x.compat();
-                NewCompat { inner: a }
+            Ok(NewCompat {
+                inner: stream.compat(),
             })
-        });
-
-        Box::pin(r)
+        })
     }
 }
 
@@ -115,9 +120,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
         .executor(AsyncStdExecutor)
         .build(AsyncStdTcpConnector);
 
-    let mut res = client
-        .get("http://209.51.188.174/".parse().unwrap())
-        .await?;
+    let mut res = client.get("http://fsf.org/".parse().unwrap()).await?;
 
     println!("Response: {}", res.status());
     println!("Headers: {:#?}\n", res.headers());
