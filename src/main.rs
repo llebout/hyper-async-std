@@ -3,13 +3,18 @@
 use async_std::net::TcpStream;
 use futures_util::io::AsyncWriteExt;
 use http::Uri;
-use hyper::body::HttpBody as _;
-use hyper::client::connect::{Connected, Connection};
+use hyper::{
+    body::HttpBody as _,
+    client::connect::{Connected, Connection},
+};
 use pin_project::pin_project;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::io::{self, AsyncRead as TokioAsyncRead, AsyncWrite as TokioAsyncWrite};
+use std::{
+    future::Future,
+    io::{self, Error},
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead as TokioAsyncRead, AsyncWrite as TokioAsyncWrite};
 use tokio_compat::io::futures_io::{Compat, FuturesAsyncReadCompatExt};
 use tower_service::Service;
 
@@ -30,18 +35,18 @@ struct AsyncStdTcpConnector;
 
 #[pin_project]
 #[derive(Copy, Clone, Debug)]
-struct NewCompat<T> {
+struct HyperServiceCompat<T> {
     #[pin]
     inner: T,
 }
 
-impl<T> From<T> for NewCompat<T> {
+impl<T> From<T> for HyperServiceCompat<T> {
     fn from(inner: T) -> Self {
-        NewCompat { inner }
+        Self { inner }
     }
 }
 
-impl<T> TokioAsyncRead for NewCompat<T>
+impl<T> TokioAsyncRead for HyperServiceCompat<T>
 where
     T: TokioAsyncRead,
 {
@@ -54,7 +59,7 @@ where
     }
 }
 
-impl<T> TokioAsyncWrite for NewCompat<T>
+impl<T> TokioAsyncWrite for HyperServiceCompat<T>
 where
     T: TokioAsyncWrite,
 {
@@ -73,14 +78,14 @@ where
     }
 }
 
-impl<T> Connection for NewCompat<T> {
+impl<T> Connection for HyperServiceCompat<T> {
     fn connected(&self) -> Connected {
         Connected::new()
     }
 }
 
 impl Service<Uri> for AsyncStdTcpConnector {
-    type Response = NewCompat<Compat<TcpStream>>;
+    type Response = HyperServiceCompat<Compat<TcpStream>>;
     type Error = async_std::io::Error;
     type Future = impl Future<Output = std::result::Result<Self::Response, Self::Error>>;
 
@@ -90,6 +95,10 @@ impl Service<Uri> for AsyncStdTcpConnector {
 
     fn call(&mut self, req: Uri) -> Self::Future {
         Box::pin(async move {
+            if req.scheme_str() != Some("http") {
+                return Err(Error::new(io::ErrorKind::Other, "only http is supported"));
+            }
+
             let port = match req.port() {
                 Some(p) => p.as_u16(),
                 None => 80,
@@ -97,17 +106,12 @@ impl Service<Uri> for AsyncStdTcpConnector {
 
             let host = match req.host() {
                 Some(host) => host,
-                _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "missing host in Uri",
-                    ))
-                }
+                _ => return Err(Error::new(io::ErrorKind::Other, "missing host in Uri")),
             };
 
             let stream = TcpStream::connect((host, port)).await?;
 
-            Ok(NewCompat {
+            Ok(HyperServiceCompat {
                 inner: stream.compat(),
             })
         })
