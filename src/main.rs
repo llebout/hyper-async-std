@@ -1,17 +1,20 @@
 #![feature(type_alias_impl_trait)]
 
-use async_std::net::TcpStream;
+use async_std::{io, net::TcpStream, task};
 use futures_util::io::AsyncWriteExt;
 use http::Uri;
 use hyper::{
     body::HttpBody as _,
     client::connect::{Connected, Connection},
+    rt::Executor,
+    Body, Client,
 };
 use pin_project::pin_project;
 use std::{
+    error::Error,
     future::Future,
-    io::{self, Error},
     pin::Pin,
+    result::Result,
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead as TokioAsyncRead, AsyncWrite as TokioAsyncWrite};
@@ -20,13 +23,13 @@ use tower_service::Service;
 
 struct AsyncStdExecutor;
 
-impl<Fut> hyper::rt::Executor<Fut> for AsyncStdExecutor
+impl<Fut> Executor<Fut> for AsyncStdExecutor
 where
-    Fut: std::future::Future + Send + 'static,
+    Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
 {
     fn execute(&self, fut: Fut) {
-        async_std::task::spawn(async move { fut.await });
+        task::spawn(async move { fut.await });
     }
 }
 
@@ -86,8 +89,8 @@ impl<T> Connection for HyperServiceCompat<T> {
 
 impl Service<Uri> for AsyncStdTcpConnector {
     type Response = HyperServiceCompat<Compat<TcpStream>>;
-    type Error = async_std::io::Error;
-    type Future = impl Future<Output = std::result::Result<Self::Response, Self::Error>>;
+    type Error = io::Error;
+    type Future = impl Future<Output = Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -96,7 +99,10 @@ impl Service<Uri> for AsyncStdTcpConnector {
     fn call(&mut self, req: Uri) -> Self::Future {
         Box::pin(async move {
             if req.scheme_str() != Some("http") {
-                return Err(Error::new(io::ErrorKind::Other, "only http is supported"));
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "only http is supported",
+                ));
             }
 
             let port = match req.port() {
@@ -106,7 +112,7 @@ impl Service<Uri> for AsyncStdTcpConnector {
 
             let host = match req.host() {
                 Some(host) => host,
-                _ => return Err(Error::new(io::ErrorKind::Other, "missing host in Uri")),
+                _ => return Err(io::Error::new(io::ErrorKind::Other, "missing host in Uri")),
             };
 
             let stream = TcpStream::connect((host, port)).await?;
@@ -119,8 +125,8 @@ impl Service<Uri> for AsyncStdTcpConnector {
 }
 
 #[async_std::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client: hyper::Client<_, hyper::Body> = hyper::Client::builder()
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let client: Client<_, Body> = Client::builder()
         .executor(AsyncStdExecutor)
         .build(AsyncStdTcpConnector);
 
@@ -131,7 +137,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
 
     while let Some(next) = res.data().await {
         let chunk = next?;
-        async_std::io::stdout().write_all(&chunk).await?;
+        io::stdout().write_all(&chunk).await?;
     }
 
     println!("\n\nDone!");
