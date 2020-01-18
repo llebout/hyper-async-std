@@ -1,6 +1,6 @@
 # hyper-async-std
 
-Attempt at using hyper with the async-std runtime.
+Attempt at using hyper with the async-std runtime and **only the async-std runtime**. tokio is included only to construct the AsyncRead and AsyncWrite traits compat layer.
 
 This is currently accomplished using the hyper's executor agnostic traits and tokio-compat with this PR:
 
